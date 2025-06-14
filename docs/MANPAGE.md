@@ -169,6 +169,12 @@ ACTIONS
 * __NewTab__ - creates a new tab.
 * __GoToNextTab__ - goes to the next tab.
 * __GoToPreviousTab__ - goes to previous tab.
+* __GoToLastFocusedTab__
+  Default: `Alt+PageUp`
+  Switches focus to the most recently focused tab. Invoking this action multiple times will toggle focus between the two most recent tabs. This differs from `GoToPreviousTab` which navigates based on tab layout order.
+* __GoToLastFocusedPane__
+  Default: `Alt+PageDown`
+  Switches focus to the most recently focused pane within the current tab. Invoking this action multiple times will toggle focus between the two most recent panes. This differs from `FocusPreviousPane` which navigates based on pane layout order.
 * __CloseTab__ - closes current tab.
 * __GoToTab: <Index\>__ - goes to the tab with the specified index number.
 * __Detach__ - detach session and exit.

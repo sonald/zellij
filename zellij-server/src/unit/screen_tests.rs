@@ -1785,6 +1785,121 @@ pub fn send_cli_resize_action_to_screen() {
 }
 
 #[test]
+fn test_go_to_last_focused_tab() {
+    let size = Size { cols: 121, rows: 20 };
+    let mut screen = create_new_screen(size, true);
+    let client_id = 1;
+    screen.add_client(client_id).unwrap();
+
+
+    // Create 3 tabs
+    new_tab(&mut screen, 1, 0); // Tab Position 0, Index 0
+    new_tab(&mut screen, 2, 1); // Tab Position 1, Index 1
+    new_tab(&mut screen, 3, 2); // Tab Position 2, Index 2 (currently active)
+
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 2);
+
+    // Focus Tab2 (pos 1), then Tab3 (pos 2)
+    // Current: Tab3 (pos 2), History: [Tab1 (pos 0), Tab2 (pos 1)]
+    // After GoToTab(1): Current: Tab1 (pos 0), History: [Tab2 (pos 1), Tab3 (pos 2)] (assuming switch_active_tab adds previous to history)
+    // After GoToTab(2): Current: Tab2 (pos 1), History: [Tab3 (pos 2), Tab1 (pos 0)]
+
+    // Simulate focusing Tab 1 (pos 0)
+    screen.switch_active_tab(0, None, true, client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 0);
+
+    // Simulate focusing Tab 2 (pos 1)
+    screen.switch_active_tab(1, None, true, client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 1);
+
+    // At this point, active is Tab2 (pos 1). History should be [..., Tab1(pos 0)]
+    // (The exact prior content of history depends on new_tab behavior, but Tab1(pos0) was last active before Tab2(pos1))
+
+    // Dispatch GoToLastFocusedTab. Should go to Tab1 (pos 0)
+    screen.switch_to_last_focused_tab(client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 0, "Should switch to Tab1 (pos 0)");
+
+    // Dispatch GoToLastFocusedTab again. Should go to Tab2 (pos 1)
+    screen.switch_to_last_focused_tab(client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 1, "Should switch back to Tab2 (pos 1)");
+
+    // Dispatch GoToLastFocusedTab again. Should go to Tab1 (pos 0)
+    screen.switch_to_last_focused_tab(client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 0, "Should switch back to Tab1 (pos 0)");
+}
+
+#[test]
+fn test_go_to_last_focused_tab_no_history() {
+    let size = Size { cols: 121, rows: 20 };
+    let mut screen = create_new_screen(size, true);
+    let client_id = 1;
+    screen.add_client(client_id).unwrap();
+
+    // Create 1 tab
+    new_tab(&mut screen, 1, 0); // Tab Position 0, Index 0
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 0);
+
+    // Dispatch GoToLastFocusedTab
+    screen.switch_to_last_focused_tab(client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().position, 0, "Should remain on the current tab");
+}
+
+#[test]
+fn test_go_to_last_focused_tab_with_closed_tab() {
+    let size = Size { cols: 121, rows: 20 };
+    let mut screen = create_new_screen(size, true);
+    let client_id = 1;
+    screen.add_client(client_id).unwrap();
+
+    // Create 3 tabs
+    new_tab(&mut screen, 1, 0); // Tab Index 0, Pos 0 ("Tab 1")
+    new_tab(&mut screen, 2, 1); // Tab Index 1, Pos 1 ("Tab 2")
+    new_tab(&mut screen, 3, 2); // Tab Index 2, Pos 2 ("Tab 3") - this is active
+
+    // Focus Tab 1 (index 0), then Tab 2 (index 1)
+    screen.switch_active_tab(0, None, true, client_id).unwrap(); // Active: Tab 0
+    screen.switch_active_tab(1, None, true, client_id).unwrap(); // Active: Tab 1, History: [..., Tab 0]
+
+    assert_eq!(screen.get_active_tab(client_id).unwrap().index, 1); // Tab 2 (index 1) is active
+
+    // Close Tab 1 (index 0)
+    // Tab indices might change upon close, need to be careful.
+    // `close_tab_at_index` takes the *current* index in the btree map.
+    // Tabs: Index 0 (Pos 0, "Tab 1"), Index 1 (Pos 1, "Tab 2"), Index 2 (Pos 2, "Tab 3")
+    // Active is Tab 1 (index 1, pos 1)
+    // History for client 1: [..., Tab 0 (index 0)]
+    // Let's find the actual key for Tab 1 (the one named "Tab 1")
+    let tab_1_key = screen.tabs.iter().find(|(_k,t)| t.name == "Tab #1").map(|(k,_)| *k).unwrap();
+    screen.close_tab_at_index(tab_1_key).unwrap();
+    // After closing Tab 1 (index 0):
+    // Remaining tabs: "Tab 2" (original index 1, new pos 0), "Tab 3" (original index 2, new pos 1)
+    // Active tab for client 1 is now Tab 2 (original index 1, new pos 0) because focus shifts.
+    // History for client 1: should have Tab 0 removed or handled.
+    // Current `tab_history` for client 1 might be empty or point to remaining tabs.
+    // `close_tab_at_index` calls `move_clients_from_closed_tab` which tries to use history.
+
+    assert_eq!(screen.get_active_tab(client_id).unwrap().name, "Tab #2");
+
+    // Dispatch GoToLastFocusedTab.
+    // Last actual focused was Tab 0 (index 0, "Tab 1"), which is now closed.
+    // History for client 1 was [Tab 0 (closed)]. Pop will yield Tab 0.
+    // `switch_to_last_focused_tab` should see it's closed and do nothing or go to next in history.
+    // If history becomes empty, it does nothing.
+    screen.switch_to_last_focused_tab(client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().name, "Tab #2", "Should remain on Tab #2 as Tab #1 is closed and history might be empty or cleaned");
+
+    // Focus Tab "Tab 3" (original index 2, current pos 1)
+    let tab_3_pos = screen.tabs.values().find(|t| t.name == "Tab #3").unwrap().position;
+    screen.switch_active_tab(tab_3_pos, None, true, client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().name, "Tab #3");
+    // History for client 1: [..., "Tab 2" (original index 1)]
+
+    // Dispatch GoToLastFocusedTab. Should go to "Tab 2" (original index 1)
+    screen.switch_to_last_focused_tab(client_id).unwrap();
+    assert_eq!(screen.get_active_tab(client_id).unwrap().name, "Tab #2", "Should switch to Tab #2");
+}
+
+#[test]
 pub fn send_cli_focus_next_pane_action() {
     let size = Size { cols: 80, rows: 20 };
     let client_id = 10; // fake client id should not appear in the screen's state

@@ -227,6 +227,8 @@ pub enum ScreenInstruction {
     ),
     SwitchTabNext(ClientId),
     SwitchTabPrev(ClientId),
+    GoToLastFocusedTab(ClientId),
+    GoToLastFocusedPane(ClientId),
     ToggleActiveSyncTab(ClientId),
     CloseTab(ClientId),
     GoToTab(u32, Option<ClientId>), // this Option is a hacky workaround, please do not copy this behaviour
@@ -506,6 +508,8 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ApplyLayout(..) => ScreenContext::ApplyLayout,
             ScreenInstruction::SwitchTabNext(..) => ScreenContext::SwitchTabNext,
             ScreenInstruction::SwitchTabPrev(..) => ScreenContext::SwitchTabPrev,
+            ScreenInstruction::GoToLastFocusedTab(..) => ScreenContext::GoToLastFocusedTab,
+            ScreenInstruction::GoToLastFocusedPane(..) => ScreenContext::GoToLastFocusedPane,
             ScreenInstruction::CloseTab(..) => ScreenContext::CloseTab,
             ScreenInstruction::GoToTab(..) => ScreenContext::GoToTab,
             ScreenInstruction::GoToTabName(..) => ScreenContext::GoToTabName,
@@ -2084,6 +2088,37 @@ impl Screen {
         self.log_and_report_session_state()
             .context("failed to toggle tabs")?;
         self.render(None)
+    }
+
+    pub fn switch_to_last_focused_tab(&mut self, client_id: ClientId) -> Result<()> {
+        let client_tab_history = self.tab_history.entry(client_id).or_default();
+
+        if let Some(target_tab_index) = client_tab_history.pop() { // Pop the actual last focused tab
+            if let Some(current_active_tab_index) = self.active_tab_indices.get(&client_id).copied() {
+                if target_tab_index != current_active_tab_index {
+                    // If the target tab is different from the current one
+                    if self.tabs.contains_key(&target_tab_index) {
+                        let target_tab_position = self.tabs[&target_tab_index].position;
+                        // switch_active_tab (via update_client_tab_focus) will push current_active_tab_index to history
+                        self.switch_active_tab(target_tab_position, None, true, client_id)?;
+                    }
+                    // If target_tab_index doesn't exist in self.tabs, it's stale and already removed from history by pop.
+                } else {
+                    // We popped target_tab_index, but it's the same as current_active_tab_index.
+                    // This means the user might be trying to "toggle" but there's no other tab in history,
+                    // or they spam the key. Put it back.
+                    client_tab_history.push(target_tab_index);
+                }
+            } else {
+                // No current_active_tab_index found for client_id. This case should ideally not happen for a connected client.
+                // If target_tab_index is valid, put it back.
+                if self.tabs.contains_key(&target_tab_index) {
+                    client_tab_history.push(target_tab_index);
+                }
+            }
+        }
+        // If client_tab_history was empty, nothing happens, which is fine.
+        Ok(())
     }
 
     pub fn focus_plugin_pane(
@@ -3880,6 +3915,19 @@ pub(crate) fn screen_thread_main(
                 screen.switch_tab_prev(None, true, client_id)?;
                 screen.unblock_input()?;
                 screen.render(None)?;
+            },
+            ScreenInstruction::GoToLastFocusedTab(client_id) => {
+                screen.switch_to_last_focused_tab(client_id)?;
+                screen.unblock_input()?;
+                screen.render(None)?;
+            },
+            ScreenInstruction::GoToLastFocusedPane(client_id) => {
+                active_tab_and_connected_client_id!(screen, client_id, |tab: &mut Tab, client_id: ClientId| {
+                    tab.switch_to_last_focused_pane(client_id);
+                });
+                screen.unblock_input()?;
+                screen.render(None)?;
+                screen.log_and_report_session_state()?;
             },
             ScreenInstruction::CloseTab(client_id) => {
                 screen.close_tab(client_id)?;

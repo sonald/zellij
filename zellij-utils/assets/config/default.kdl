@@ -170,6 +170,8 @@ keybinds {
         bind "Ctrl g" { SwitchToMode "Locked"; }
         bind "Ctrl q" { Quit; }
         bind "Alt f" { ToggleFloatingPanes; }
+        bind "Alt PageUp" { GoToLastFocusedTab; }
+        bind "Alt PageDown" { GoToLastFocusedPane; }
         bind "Alt n" { NewPane; }
         bind "Alt i" { MoveTab "Left"; }
         bind "Alt o" { MoveTab "Right"; }

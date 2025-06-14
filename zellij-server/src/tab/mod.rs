@@ -234,6 +234,7 @@ pub(crate) struct Tab {
     should_clear_display_before_rendering: bool,
     mode_info: Rc<RefCell<HashMap<ClientId, ModeInfo>>>,
     default_mode_info: ModeInfo,
+    last_focused_pane_id: BTreeMap<ClientId, PaneId>,
     pub style: Style,
     connected_clients: Rc<RefCell<HashSet<ClientId>>>,
     draw_pane_frames: bool,
@@ -733,6 +734,7 @@ impl Tab {
 
         Tab {
             index,
+            last_focused_pane_id: BTreeMap::new(),
             position,
             tiled_panes,
             floating_panes,
@@ -857,6 +859,14 @@ impl Tab {
         }
     }
     fn relayout_floating_panes(&mut self, search_backwards: bool) -> Result<()> {
+        let connected_client_ids: Vec<ClientId> = self.connected_clients.borrow().iter().copied().collect();
+        let mut old_focused_panes = BTreeMap::new();
+        for client_id in &connected_client_ids {
+            if let Some(pane_id) = self.get_active_pane_id(*client_id) {
+                old_focused_panes.insert(*client_id, pane_id);
+            }
+        }
+
         if let Some(layout_candidate) = self
             .swap_layouts
             .swap_floating_panes(&self.floating_panes, search_backwards)
@@ -885,6 +895,14 @@ impl Tab {
             .apply_floating_panes_layout_to_existing_panes(&layout_candidate)
             .non_fatal();
         }
+
+        for client_id in connected_client_ids {
+            if let Some(old_focus) = old_focused_panes.get(&client_id) {
+                if Some(*old_focus) != self.get_active_pane_id(client_id) {
+                    self.last_focused_pane_id.insert(client_id, *old_focus);
+                }
+            }
+        }
         self.set_force_render();
         self.senders
             .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
@@ -892,6 +910,14 @@ impl Tab {
         Ok(())
     }
     fn relayout_tiled_panes(&mut self, search_backwards: bool) -> Result<()> {
+        let connected_client_ids: Vec<ClientId> = self.connected_clients.borrow().iter().copied().collect();
+        let mut old_focused_panes = BTreeMap::new();
+        for client_id in &connected_client_ids {
+            if let Some(pane_id) = self.get_active_pane_id(*client_id) {
+                old_focused_panes.insert(*client_id, pane_id);
+            }
+        }
+
         if self.tiled_panes.fullscreen_is_active() {
             self.tiled_panes.unset_fullscreen();
         }
@@ -932,6 +958,14 @@ impl Tab {
         let display_area = *self.display_area.borrow();
         // we do this so that the new swap layout has a chance to pass through the constraint system
         self.tiled_panes.resize(display_area);
+
+        for client_id in connected_client_ids {
+            if let Some(old_focus) = old_focused_panes.get(&client_id) {
+                if Some(*old_focus) != self.get_active_pane_id(client_id) {
+                    self.last_focused_pane_id.insert(client_id, *old_focus);
+                }
+            }
+        }
         self.set_should_clear_display_before_rendering();
         self.senders
             .send_to_pty_writer(PtyWriteInstruction::ApplyCachedResizes)
@@ -1110,9 +1144,15 @@ impl Tab {
     pub fn toggle_pane_embed_or_floating(&mut self, client_id: ClientId) -> Result<()> {
         let err_context =
             || format!("failed to toggle embedded/floating pane for client {client_id}");
+
+        let current_focused_pane_before_toggle = self.get_active_pane_id(client_id);
+
         if self.tiled_panes.fullscreen_is_active() {
-            self.tiled_panes.unset_fullscreen();
+            self.tiled_panes.unset_fullscreen(); // This might change focus if the fullscreen pane was not the main active one.
+                                                 // However, the main active pane for the client is what we care about.
         }
+
+        let mut focus_potentially_changed = false;
         if self.floating_panes.panes_are_visible() {
             if let Some(focused_floating_pane_id) = self.floating_panes.active_pane_id(client_id) {
                 if self.tiled_panes.has_room_for_new_pane() {
@@ -1122,22 +1162,32 @@ impl Tab {
                         "failed to find floating pane (ID: {focused_floating_pane_id:?}) to embed for client {client_id}",
                     ))
                         .with_context(err_context)?;
-                    self.hide_floating_panes();
-                    self.add_tiled_pane(
+                    self.hide_floating_panes(); // Focus shifts to tiled panes
+                    self.add_tiled_pane( // This will focus the new tiled pane for the client
                         floating_pane_to_embed,
                         focused_floating_pane_id,
                         Some(client_id),
                     )?;
+                    focus_potentially_changed = true;
                 }
             }
-        } else if let Some(focused_pane_id) = self.tiled_panes.focused_pane_id(client_id) {
+        } else if let Some(focused_tiled_pane_id) = self.tiled_panes.focused_pane_id(client_id) {
             if self.get_selectable_tiled_panes().count() <= 1 {
                 // don't close the only pane on screen...
                 return Ok(());
             }
-            if let Some(embedded_pane_to_float) = self.extract_pane(focused_pane_id, true) {
-                self.show_floating_panes();
-                self.add_floating_pane(embedded_pane_to_float, focused_pane_id, None, true)?;
+            if let Some(embedded_pane_to_float) = self.extract_pane(focused_tiled_pane_id, true) {
+                self.show_floating_panes(); // Focus shifts to floating panes
+                self.add_floating_pane(embedded_pane_to_float, focused_tiled_pane_id, None, true)?; // This focuses the new floating pane for all clients
+                focus_potentially_changed = true;
+            }
+        }
+
+        if focus_potentially_changed {
+            if let Some(old_focus) = current_focused_pane_before_toggle {
+                if Some(old_focus) != self.get_active_pane_id(client_id) {
+                    self.last_focused_pane_id.insert(client_id, old_focus);
+                }
             }
         }
         Ok(())
@@ -1183,20 +1233,40 @@ impl Tab {
         client_id: Option<ClientId>,
         default_shell: Option<TerminalAction>,
     ) -> Result<()> {
-        if self.floating_panes.panes_are_visible() {
-            self.hide_floating_panes();
-            self.set_force_render();
+        let mut client_ids_to_update_last_focus: Vec<ClientId> = Vec::new();
+        let mut old_focus_map: BTreeMap<ClientId, PaneId> = BTreeMap::new();
+
+        if let Some(id) = client_id {
+            client_ids_to_update_last_focus.push(id);
         } else {
-            self.show_floating_panes();
+            client_ids_to_update_last_focus.extend(self.connected_clients.borrow().iter().copied());
+        }
+
+        for id_to_update in &client_ids_to_update_last_focus {
+            if let Some(old_focus) = self.get_active_pane_id(*id_to_update) {
+                old_focus_map.insert(*id_to_update, old_focus);
+            }
+        }
+
+        let focus_changed_for_at_least_one_client;
+        if self.floating_panes.panes_are_visible() {
+            self.hide_floating_panes(); // Focus shifts to tiled panes for all clients in the tab
+            self.set_force_render();
+            focus_changed_for_at_least_one_client = true; // Assumed true as focus always shifts to tiled panes
+        } else {
+            self.show_floating_panes(); // Focus might shift to a floating pane
+            focus_changed_for_at_least_one_client = true; // Assume true, detailed logic below
             match self.floating_panes.last_selectable_floating_pane_id() {
                 Some(last_selectable_floating_pane_id) => match client_id {
-                    Some(client_id) => {
-                        if !self.floating_panes.active_panes_contain(&client_id) {
+                    Some(client_id_param) => {
+                        // Focus only for the specified client_id
+                        if !self.floating_panes.active_panes_contain(&client_id_param) {
                             self.floating_panes
-                                .focus_pane(last_selectable_floating_pane_id, client_id);
+                                .focus_pane(last_selectable_floating_pane_id, client_id_param);
                         }
                     },
                     None => {
+                        // Focus for all clients
                         self.floating_panes
                             .focus_pane_for_all_clients(last_selectable_floating_pane_id);
                     },
@@ -1220,9 +1290,21 @@ impl Tab {
                     self.senders
                         .send_to_pty(instruction)
                         .with_context(|| format!("failed to open a floating pane for client"))?;
+                    // A new pane is spawned and will be focused by add_floating_pane,
+                    // which handles last_focused_pane_id.
                 },
             }
             self.floating_panes.set_force_render();
+        }
+
+        if focus_changed_for_at_least_one_client {
+            for id_to_update in client_ids_to_update_last_focus {
+                if let Some(old_focus) = old_focus_map.get(&id_to_update) {
+                    if Some(*old_focus) != self.get_active_pane_id(id_to_update) {
+                        self.last_focused_pane_id.insert(id_to_update, *old_focus);
+                    }
+                }
+            }
         }
         self.set_force_render();
         Ok(())
@@ -2540,116 +2622,174 @@ impl Tab {
         if !self.has_selectable_panes() {
             return;
         }
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
         if self.tiled_panes.fullscreen_is_active() {
             self.switch_next_pane_fullscreen(client_id);
-            return;
+        } else {
+            self.tiled_panes.focus_next_pane(client_id);
         }
-        self.tiled_panes.focus_next_pane(client_id);
+        if let Some(old_focus) = current_focused_pane_id {
+            if Some(old_focus) != self.get_active_pane_id(client_id) {
+                self.last_focused_pane_id.insert(client_id, old_focus);
+            }
+        }
     }
     pub fn focus_previous_pane(&mut self, client_id: ClientId) {
         if !self.has_selectable_panes() {
             return;
         }
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
         if self.tiled_panes.fullscreen_is_active() {
             self.switch_prev_pane_fullscreen(client_id);
-            return;
+        } else {
+            self.tiled_panes.focus_previous_pane(client_id);
         }
-        self.tiled_panes.focus_previous_pane(client_id);
+        if let Some(old_focus) = current_focused_pane_id {
+            if Some(old_focus) != self.get_active_pane_id(client_id) {
+                self.last_focused_pane_id.insert(client_id, old_focus);
+            }
+        }
     }
     pub fn focus_pane_on_edge(&mut self, direction: Direction, client_id: ClientId) {
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
         if self.floating_panes.panes_are_visible() {
             self.floating_panes.focus_pane_on_edge(direction, client_id);
         } else if self.has_selectable_panes() && !self.tiled_panes.fullscreen_is_active() {
             self.tiled_panes.focus_pane_on_edge(direction, client_id);
         }
+        if let Some(old_focus) = current_focused_pane_id {
+            if Some(old_focus) != self.get_active_pane_id(client_id) {
+                self.last_focused_pane_id.insert(client_id, old_focus);
+            }
+        }
     }
     // returns a boolean that indicates whether the focus moved
     pub fn move_focus_left(&mut self, client_id: ClientId) -> Result<bool> {
         let err_context = || format!("failed to move focus left for client {}", client_id);
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
 
-        if self.floating_panes.panes_are_visible() {
+        let focus_moved = if self.floating_panes.panes_are_visible() {
             self.floating_panes
                 .move_focus(
                     client_id,
                     &self.connected_clients.borrow().iter().copied().collect(),
                     &Direction::Left,
                 )
-                .with_context(err_context)
+                .with_context(err_context)?
         } else {
             if !self.has_selectable_panes() {
                 return Ok(false);
             }
             if self.tiled_panes.fullscreen_is_active() {
-                return Ok(self.focus_pane_left_fullscreen(client_id));
+                self.focus_pane_left_fullscreen(client_id)
+            } else {
+                self.tiled_panes.move_focus_left(client_id)
             }
-            Ok(self.tiled_panes.move_focus_left(client_id))
+        };
+        if focus_moved {
+            if let Some(old_focus) = current_focused_pane_id {
+                 if Some(old_focus) != self.get_active_pane_id(client_id) {
+                    self.last_focused_pane_id.insert(client_id, old_focus);
+                }
+            }
         }
+        Ok(focus_moved)
     }
     pub fn move_focus_down(&mut self, client_id: ClientId) -> Result<bool> {
         let err_context = || format!("failed to move focus down for client {}", client_id);
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
 
-        if self.floating_panes.panes_are_visible() {
+        let focus_moved = if self.floating_panes.panes_are_visible() {
             self.floating_panes
                 .move_focus(
                     client_id,
                     &self.connected_clients.borrow().iter().copied().collect(),
                     &Direction::Down,
                 )
-                .with_context(err_context)
+                .with_context(err_context)?
         } else {
             if !self.has_selectable_panes() {
                 return Ok(false);
             }
             if self.tiled_panes.fullscreen_is_active() {
                 self.focus_pane_down_fullscreen(client_id);
-                return Ok(true);
+                true
+            } else {
+                self.tiled_panes.move_focus_down(client_id)
             }
-            Ok(self.tiled_panes.move_focus_down(client_id))
+        };
+        if focus_moved {
+            if let Some(old_focus) = current_focused_pane_id {
+                 if Some(old_focus) != self.get_active_pane_id(client_id) {
+                    self.last_focused_pane_id.insert(client_id, old_focus);
+                }
+            }
         }
+        Ok(focus_moved)
     }
     pub fn move_focus_up(&mut self, client_id: ClientId) -> Result<bool> {
         let err_context = || format!("failed to move focus up for client {}", client_id);
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
 
-        if self.floating_panes.panes_are_visible() {
+        let focus_moved = if self.floating_panes.panes_are_visible() {
             self.floating_panes
                 .move_focus(
                     client_id,
                     &self.connected_clients.borrow().iter().copied().collect(),
                     &Direction::Up,
                 )
-                .with_context(err_context)
+                .with_context(err_context)?
         } else {
             if !self.has_selectable_panes() {
                 return Ok(false);
             }
             if self.tiled_panes.fullscreen_is_active() {
                 self.focus_pane_up_fullscreen(client_id);
-                return Ok(true);
+                true
+            } else {
+                self.tiled_panes.move_focus_up(client_id)
             }
-            Ok(self.tiled_panes.move_focus_up(client_id))
+        };
+        if focus_moved {
+            if let Some(old_focus) = current_focused_pane_id {
+                if Some(old_focus) != self.get_active_pane_id(client_id) {
+                    self.last_focused_pane_id.insert(client_id, old_focus);
+                }
+            }
         }
+        Ok(focus_moved)
     }
     // returns a boolean that indicates whether the focus moved
     pub fn move_focus_right(&mut self, client_id: ClientId) -> Result<bool> {
         let err_context = || format!("failed to move focus right for client {}", client_id);
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
 
-        if self.floating_panes.panes_are_visible() {
+        let focus_moved = if self.floating_panes.panes_are_visible() {
             self.floating_panes
                 .move_focus(
                     client_id,
                     &self.connected_clients.borrow().iter().copied().collect(),
                     &Direction::Right,
                 )
-                .with_context(err_context)
+                .with_context(err_context)?
         } else {
             if !self.has_selectable_panes() {
                 return Ok(false);
             }
             if self.tiled_panes.fullscreen_is_active() {
-                return Ok(self.focus_pane_right_fullscreen(client_id));
+                self.focus_pane_right_fullscreen(client_id)
+            } else {
+                self.tiled_panes.move_focus_right(client_id)
             }
-            Ok(self.tiled_panes.move_focus_right(client_id))
+        };
+        if focus_moved {
+            if let Some(old_focus) = current_focused_pane_id {
+                if Some(old_focus) != self.get_active_pane_id(client_id) {
+                    self.last_focused_pane_id.insert(client_id, old_focus);
+                }
+            }
         }
+        Ok(focus_moved)
     }
     pub fn move_active_pane(&mut self, client_id: ClientId) {
         if !self.has_selectable_panes() {
@@ -3084,20 +3224,34 @@ impl Tab {
             format!("failed to close focused pane (ID {pane_id:?}) for client {client_id}")
         };
 
-        if self.floating_panes.panes_are_visible() {
-            if let Some(active_floating_pane_id) = self.floating_panes.active_pane_id(client_id) {
-                self.close_pane(active_floating_pane_id, false);
+        let pane_to_close = self.get_active_pane_id(client_id);
+
+        if let Some(pane_id_to_close) = pane_to_close {
+            // Store the ID of the pane that is about to be closed as the last focused one.
+            self.last_focused_pane_id.insert(client_id, pane_id_to_close);
+
+            let is_floating_pane_focused = self.floating_panes.panes_are_visible() &&
+                                           self.floating_panes.active_pane_id(client_id) == Some(pane_id_to_close);
+
+            if is_floating_pane_focused {
+                self.close_pane(pane_id_to_close, false);
                 self.senders
-                    .send_to_pty(PtyInstruction::ClosePane(active_floating_pane_id))
-                    .with_context(|| err_context(active_floating_pane_id))?;
-                return Ok(());
+                    .send_to_pty(PtyInstruction::ClosePane(pane_id_to_close))
+                    .with_context(|| err_context(pane_id_to_close))?;
+                // Focus will shift implicitly by close_pane logic, new focus is NOT the one closed.
+            } else if self.tiled_panes.get_active_pane_id(client_id) == Some(pane_id_to_close) {
+                // If not the active floating pane (or floating panes are not visible),
+                // then it must be a tiled pane that's focused.
+                self.close_pane(pane_id_to_close, false);
+                self.senders
+                    .send_to_pty(PtyInstruction::ClosePane(pane_id_to_close))
+                    .with_context(|| err_context(pane_id_to_close))?;
+                // Focus will shift implicitly by close_pane logic.
             }
-        }
-        if let Some(active_pane_id) = self.tiled_panes.get_active_pane_id(client_id) {
-            self.close_pane(active_pane_id, false);
-            self.senders
-                .send_to_pty(PtyInstruction::ClosePane(active_pane_id))
-                .with_context(|| err_context(active_pane_id))?;
+            // If pane_to_close was Some, but neither floating nor tiled active_pane matched,
+            // it implies an inconsistent state or a pane that isn't truly "focused" in a way
+            // that close_focused_pane should handle. The original logic also might not have
+            // closed anything in such a rare case if the get_active_pane_id checks failed.
         }
         Ok(())
     }
@@ -3996,6 +4150,7 @@ impl Tab {
     fn focus_pane_at(&mut self, point: &Position, client_id: ClientId) -> Result<()> {
         let err_context =
             || format!("failed to focus pane at position {point:?} for client {client_id}");
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
 
         if self.floating_panes.panes_are_visible() {
             if let Some(clicked_pane) = self
@@ -4005,15 +4160,20 @@ impl Tab {
             {
                 self.floating_panes.focus_pane(clicked_pane, client_id);
                 self.set_pane_active_at(clicked_pane);
-                return Ok(());
+                // No need to return early, last_focused_pane_id update is below
             }
-        }
-        if let Some(clicked_pane) = self.get_pane_id_at(point, true).with_context(err_context)? {
+        } else if let Some(clicked_pane) = self.get_pane_id_at(point, true).with_context(err_context)? {
             self.tiled_panes.focus_pane(clicked_pane, client_id);
             self.set_pane_active_at(clicked_pane);
-            if self.floating_panes.panes_are_visible() {
+            if self.floating_panes.panes_are_visible() { // Should not happen if we are in the else branch, but defensive
                 self.hide_floating_panes();
                 self.set_force_render();
+            }
+        }
+
+        if let Some(old_focus) = current_focused_pane_id {
+            if Some(old_focus) != self.get_active_pane_id(client_id) { // if focus actually changed
+                self.last_focused_pane_id.insert(client_id, old_focus);
             }
         }
         Ok(())
@@ -4268,6 +4428,29 @@ impl Tab {
         Ok(())
     }
 
+    fn focus_pane(&mut self, pane_id: PaneId, client_id: ClientId) {
+        let current_focused_pane_id = self.get_active_pane_id(client_id);
+        if current_focused_pane_id == Some(pane_id) {
+            // pane is already focused, no need to update history or change focus
+            self.set_pane_active_at(pane_id); // Update active time
+            return;
+        }
+
+        if let Some(old_focus) = current_focused_pane_id {
+             // current_focused_pane_id is Some, and different from pane_id
+            self.last_focused_pane_id.insert(client_id, old_focus);
+        }
+        // If current_focused_pane_id was None, we don't add to last_focused_pane_id,
+        // as there was no "last focused pane" to record for this client.
+
+        if self.floating_panes.panes_are_visible() {
+            self.floating_panes.focus_pane(pane_id, client_id);
+        } else {
+            self.tiled_panes.focus_pane(pane_id, client_id);
+        }
+        self.set_pane_active_at(pane_id); // Ensure active_at is updated
+    }
+
     pub fn search_down(&mut self, client_id: ClientId) {
         if let Some(active_pane) = self.get_active_pane_or_floating_pane_mut(client_id) {
             active_pane.search_down();
@@ -4450,31 +4633,55 @@ impl Tab {
         should_float: bool,
         client_id: ClientId,
     ) -> Result<()> {
-        // TODO: should error if pane is not selectable
-        self.tiled_panes
-            .focus_pane_if_exists(pane_id, client_id)
-            .map(|_| self.hide_floating_panes())
-            .or_else(|_| {
-                let focused_floating_pane =
-                    self.floating_panes.focus_pane_if_exists(pane_id, client_id);
-                if focused_floating_pane.is_ok() {
-                    self.show_floating_panes()
-                };
-                focused_floating_pane
-            })
-            .or_else(|_| match self.suppressed_panes.remove(&pane_id) {
-                Some(mut pane) => {
-                    pane.1.set_selectable(true);
-                    if should_float {
-                        self.show_floating_panes();
-                        self.add_floating_pane(pane.1, pane_id, None, true)
-                    } else {
-                        self.hide_floating_panes();
-                        self.add_tiled_pane(pane.1, pane_id, Some(client_id))
-                    }
-                },
-                None => Ok(()),
-            })
+        let current_focused_pane_id_for_client = self.get_active_pane_id(client_id);
+
+        if current_focused_pane_id_for_client == Some(pane_id) {
+            // Already focused on the target pane. Ensure active time is updated.
+            self.set_pane_active_at(pane_id);
+            return Ok(());
+        }
+
+        // Attempt to focus in tiled panes first
+        if self.tiled_panes.panes_contain(&pane_id) {
+            if self.tiled_panes.focus_pane_if_exists(pane_id, client_id).is_ok() {
+                if let Some(old_focus) = current_focused_pane_id_for_client {
+                    self.last_focused_pane_id.insert(client_id, old_focus);
+                }
+                self.hide_floating_panes(); // As per original logic
+                self.set_pane_active_at(pane_id);
+                return Ok(());
+            }
+        }
+
+        // Attempt to focus in floating panes
+        if self.floating_panes.panes_contain(&pane_id) {
+             if self.floating_panes.focus_pane_if_exists(pane_id, client_id).is_ok() {
+                if let Some(old_focus) = current_focused_pane_id_for_client {
+                    self.last_focused_pane_id.insert(client_id, old_focus);
+                }
+                self.show_floating_panes(); // As per original logic
+                self.set_pane_active_at(pane_id);
+                return Ok(());
+            }
+        }
+
+        // Attempt to unsuppress and focus
+        if let Some(mut pane_entry) = self.suppressed_panes.remove(&pane_id) {
+            pane_entry.1.set_selectable(true);
+            // `add_floating_pane` (if should_focus_new_pane=true) and
+            // `add_tiled_pane` (if client_id=Some(_)) are already instrumented
+            // to handle last_focused_pane_id for the client they are focusing.
+            // So, current_focused_pane_id_for_client will be correctly captured by them.
+            return if should_float {
+                self.show_floating_panes();
+                self.add_floating_pane(pane_entry.1, pane_id, None, true) // true => should_focus_new_pane for all clients
+            } else {
+                self.hide_floating_panes();
+                self.add_tiled_pane(pane_entry.1, pane_id, Some(client_id)) // Some(client_id) => focus for this client
+            };
+        }
+
+        Ok(()) // Pane not found or no focus change occurred that wasn't handled by sub-methods
     }
     pub fn focus_suppressed_pane_for_all_clients(&mut self, pane_id: PaneId) {
         match self.suppressed_panes.remove(&pane_id) {
@@ -4543,6 +4750,13 @@ impl Tab {
                 .with_context(err_context)?;
             self.floating_panes.add_pane(pane_id, pane);
             if should_focus_new_pane {
+                for connected_client_id in self.connected_clients.borrow().iter().copied() {
+                    if let Some(current_focused_pane_id) = self.get_active_pane_id(connected_client_id) {
+                         if current_focused_pane_id != pane_id {
+                            self.last_focused_pane_id.insert(connected_client_id, current_focused_pane_id);
+                        }
+                    }
+                }
                 self.floating_panes.focus_pane_for_all_clients(pane_id);
             }
         }
@@ -4576,8 +4790,13 @@ impl Tab {
                 self.tiled_panes.insert_pane(pane_id, pane, client_id);
             }
             self.set_should_clear_display_before_rendering();
-            if let Some(client_id) = client_id {
-                self.tiled_panes.focus_pane(pane_id, client_id);
+            if let Some(client_id_to_focus) = client_id {
+                if let Some(current_focused_pane_id) = self.get_active_pane_id(client_id_to_focus) {
+                    if current_focused_pane_id != pane_id {
+                        self.last_focused_pane_id.insert(client_id_to_focus, current_focused_pane_id);
+                    }
+                }
+                self.tiled_panes.focus_pane(pane_id, client_id_to_focus);
             }
         }
         if should_auto_layout {
@@ -4912,6 +5131,47 @@ impl Tab {
         self.get_pane_with_id(pane_id)
             .map(|p| p.position_and_size().stacked.is_some())
             .unwrap_or(false)
+    }
+
+    pub fn switch_to_last_focused_pane(&mut self, client_id: ClientId) {
+        if let Some(pane_to_focus) = self.last_focused_pane_id.get(&client_id).copied() {
+            let current_focused_pane = self.get_active_pane_id(client_id);
+            if current_focused_pane != Some(pane_to_focus) {
+                // Determine if the pane_to_focus is tiled, floating, or suppressed
+                let mut is_suppressed = false;
+                let mut is_floating_when_focused = self.floating_panes.panes_contain(&pane_to_focus);
+
+                if !is_floating_when_focused && !self.tiled_panes.panes_contain(&pane_to_focus) {
+                    if self.suppressed_panes.contains_key(&pane_to_focus) {
+                        is_suppressed = true;
+                        // Decide if it should become floating or tiled. Default to floating for now.
+                        is_floating_when_focused = true;
+                    } else {
+                        // Pane no longer exists
+                        self.last_focused_pane_id.remove(&client_id);
+                        return;
+                    }
+                }
+
+                // The focus_pane_with_id method already handles storing the current focus to last_focused_pane_id
+                // and also manages showing/hiding floating panes layer and unsuppressing.
+                // The 'should_float' argument to focus_pane_with_id controls if a suppressed pane becomes floating.
+                match self.focus_pane_with_id(pane_to_focus, is_floating_when_focused, client_id) {
+                    Ok(_) => {
+                        if let Some(current_focus_for_storage) = current_focused_pane {
+                             // After focus_pane_with_id, the last_focused_pane_id for this client was overwritten
+                             // with current_focused_pane. We want to make it so that GoToLastFocusedPane can toggle,
+                             // so we re-insert the pane_to_focus (which was the *actual* last focused one before this action)
+                             // back into history, effectively swapping them for toggling.
+                            self.last_focused_pane_id.insert(client_id, current_focus_for_storage);
+                        }
+                    },
+                    Err(e) => {
+                        log::error!("Failed to switch to last focused pane: {}", e);
+                    }
+                }
+            }
+        }
     }
 }
 

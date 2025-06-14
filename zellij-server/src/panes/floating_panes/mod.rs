@@ -830,6 +830,7 @@ impl FloatingPanes {
             log::error!("Cannot focus pane {:?} as it is not selectable!", pane_id);
             return;
         }
+        // Tab::focus_pane (the caller) will update last_focused_pane_id
         self.active_panes
             .insert(client_id, pane_id, &mut self.panes);
         self.focus_pane_for_all_clients(pane_id);

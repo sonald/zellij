@@ -14750,3 +14750,169 @@ fn correctly_resize_frameless_panes_on_pane_close() {
     let content_size = (pane.get_content_columns(), pane.get_content_rows());
     assert_eq!(content_size, (cols, rows));
 }
+
+fn create_tab_with_tiled_panes(size: Size, pane_count: usize) -> Tab {
+    let mut tab = create_new_tab(size, true); // stacked_resize can be true
+    // PaneId::Terminal(1) is created by default by create_new_tab
+    for i in 2..=pane_count {
+        tab.new_pane(PaneId::Terminal(i as u32), None, None, None, None, false, true, Some(1)).unwrap();
+    }
+    tab
+}
+
+fn add_floating_panes_to_tab(tab: &mut Tab, floating_pane_count: usize, client_id: ClientId) {
+    let first_new_floating_pane_id = tab.tiled_panes.panes.keys().len() as u32 + 1;
+    for i in 0..floating_pane_count {
+        let pane_id = PaneId::Terminal(first_new_floating_pane_id + i as u32);
+        // for tests, let's place them simply, eg. full height, side by side
+        let coordinates = Some(FloatingPaneCoordinates {
+            x: Some(SplitSize::Fixed((i * 10) as usize)), // Adjust x to avoid overlap for basic tests
+            y: Some(SplitSize::Fixed(0)),
+            width: Some(SplitSize::Fixed(10)),
+            height: Some(SplitSize::Percent(100.0)),
+            pinned: None,
+        });
+        tab.new_pane(pane_id, None, Some(true), None, coordinates, false, true, Some(client_id)).unwrap();
+    }
+}
+
+
+#[test]
+fn test_go_to_last_focused_pane_tiled() {
+    let size = Size { cols: 120, rows: 24 };
+    let mut tab = create_tab_with_tiled_panes(size, 3); // Creates Pane1, Pane2, Pane3 (Terminal 1,2,3)
+    let client_id = 1;
+
+    // Focus Pane2, then Pane3
+    tab.focus_pane(PaneId::Terminal(2), client_id);
+    tab.focus_pane(PaneId::Terminal(3), client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+
+    // Dispatch GoToLastFocusedPane. Assert Pane2 is active.
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+
+    // Dispatch GoToLastFocusedPane again. Assert Pane3 is active.
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+
+    // Dispatch GoToLastFocusedPane again. Assert Pane2 is active.
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+}
+
+#[test]
+fn test_go_to_last_focused_pane_floating() {
+    let size = Size { cols: 120, rows: 24 };
+    let mut tab = create_tab_with_tiled_panes(size, 1); // Tiled Pane1 (Terminal 1)
+    let client_id = 1;
+
+    add_floating_panes_to_tab(&mut tab, 2, client_id); // FloatingPane1 (Terminal 2), FloatingPane2 (Terminal 3)
+    tab.show_floating_panes(); // Make floating panes layer visible and focus first floating
+
+    // Focus FloatingPane1 (ID: Terminal(2)), then FloatingPane2 (ID: Terminal(3))
+    // add_floating_panes focuses the last one, so Terminal(3) should be active
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    // Explicitly focus to ensure history
+    tab.focus_pane(PaneId::Terminal(2), client_id);
+    tab.focus_pane(PaneId::Terminal(3), client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+
+
+    // Dispatch GoToLastFocusedPane. Assert FloatingPane1 (Terminal 2) is active.
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert!(tab.are_floating_panes_visible(), "Floating panes should still be visible");
+
+    // Dispatch GoToLastFocusedPane again. Assert FloatingPane2 (Terminal 3) is active.
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    assert!(tab.are_floating_panes_visible(), "Floating panes should still be visible");
+}
+
+#[test]
+fn test_go_to_last_focused_pane_mixed_tiled_floating() {
+    let size = Size { cols: 120, rows: 24 };
+    let mut tab = create_tab_with_tiled_panes(size, 2); // Tiled1 (Terminal 1), Tiled2 (Terminal 2)
+    let client_id = 1;
+    add_floating_panes_to_tab(&mut tab, 1, client_id); // Floating1 (Terminal 3)
+
+    // 1. Focus Tiled2 (Terminal 2)
+    tab.hide_floating_panes(); // Ensure tiled layer is active
+    tab.focus_pane(PaneId::Terminal(2), client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert!(!tab.are_floating_panes_visible());
+
+    // 2. Make floating panes visible, focus Floating1 (Terminal 3)
+    tab.show_floating_panes(); // This will auto-focus the first/last floating pane (Terminal 3)
+                               // but let's explicitly focus to be sure for history
+    tab.focus_pane(PaneId::Terminal(3), client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    assert!(tab.are_floating_panes_visible());
+
+    // last_focused_pane_id should now contain Tiled2 (Terminal 2)
+
+    // 3. Dispatch GoToLastFocusedPane. Assert Tiled2 is active (floating panes should hide).
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(2)));
+    assert!(!tab.are_floating_panes_visible(), "Floating panes should hide when switching to tiled");
+
+    // last_focused_pane_id should now contain Floating1 (Terminal 3)
+
+    // 4. Dispatch GoToLastFocusedPane. Assert Floating1 is active (floating panes should show).
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    assert!(tab.are_floating_panes_visible(), "Floating panes should show when switching to floating");
+}
+
+#[test]
+fn test_go_to_last_focused_pane_no_history() {
+    let size = Size { cols: 120, rows: 24 };
+    let mut tab = create_tab_with_tiled_panes(size, 1); // Pane1 (Terminal 1)
+    let client_id = 1;
+
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(1)));
+
+    // Dispatch GoToLastFocusedPane
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(1)), "Should remain on the current pane");
+}
+
+#[test]
+fn test_go_to_last_focused_pane_with_closed_pane() {
+    let size = Size { cols: 120, rows: 24 };
+    let mut tab = create_tab_with_tiled_panes(size, 3); // Pane1 (T1), Pane2 (T2), Pane3 (T3)
+    let client_id = 1;
+
+    // Focus Pane2 (T2), then Pane3 (T3)
+    tab.focus_pane(PaneId::Terminal(2), client_id);
+    tab.focus_pane(PaneId::Terminal(3), client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    // last_focused_pane_id should be T2
+
+    // Close Pane2 (T2)
+    tab.close_pane(PaneId::Terminal(2), false); // false means don't ignore suppressed (not relevant here)
+    // Focus might shift, eg to Pane1 or Pane3. Let's assume it shifts to Pane1 (default behavior often).
+    // Or it might stay on Pane3 if Pane2 was not adjacent to Pane3 in focus order after close.
+    // The key is that last_focused_pane_id still holds T2.
+
+    // Dispatch GoToLastFocusedPane. T2 is closed.
+    tab.switch_to_last_focused_pane(client_id);
+    // Behavior: switch_to_last_focused_pane will try to focus T2.
+    // focus_pane_with_id will find T2 doesn't exist in tiled or floating, and not in suppressed.
+    // So, it should not change focus from the current (eg. Pane3 or Pane1).
+    // And T2 should be removed from last_focused_pane_id.
+    let current_focus_after_failed_switch = tab.get_active_pane_id(client_id).unwrap();
+    assert!(current_focus_after_failed_switch == PaneId::Terminal(3) || current_focus_after_failed_switch == PaneId::Terminal(1));
+    assert_eq!(tab.last_focused_pane_id.get(&client_id), None, "Last focused pane should be cleared if pane is closed");
+
+    // Setup for next part of test: Focus Pane1, then Pane3. Pane2 is already closed.
+    tab.focus_pane(PaneId::Terminal(1), client_id);
+    tab.focus_pane(PaneId::Terminal(3), client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(3)));
+    // last_focused_pane_id should now be T1
+
+    // Dispatch GoToLastFocusedPane. Assert Pane1 is active.
+    tab.switch_to_last_focused_pane(client_id);
+    assert_eq!(tab.get_active_pane_id(client_id), Some(PaneId::Terminal(1)));
+}

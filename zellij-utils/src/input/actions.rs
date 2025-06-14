@@ -204,6 +204,8 @@ pub enum Action {
     GoToNextTab,
     /// Go to the previous tab.
     GoToPreviousTab,
+    GoToLastFocusedTab, // New variant
+    GoToLastFocusedPane, // New variant
     /// Close the current tab.
     CloseTab,
     GoToTab(u32),
@@ -510,6 +512,8 @@ impl Action {
             CliAction::UndoRenamePane => Ok(vec![Action::UndoRenamePane]),
             CliAction::GoToNextTab => Ok(vec![Action::GoToNextTab]),
             CliAction::GoToPreviousTab => Ok(vec![Action::GoToPreviousTab]),
+            CliAction::GoToLastFocusedTab => Ok(vec![Action::GoToLastFocusedTab]),
+            CliAction::GoToLastFocusedPane => Ok(vec![Action::GoToLastFocusedPane]),
             CliAction::CloseTab => Ok(vec![Action::CloseTab]),
             CliAction::GoToTab { index } => Ok(vec![Action::GoToTab(index)]),
             CliAction::GoToTabName { name, create } => Ok(vec![Action::GoToTabName(name, create)]),

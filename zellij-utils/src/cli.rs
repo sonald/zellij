@@ -606,6 +606,10 @@ pub enum CliAction {
     GoToNextTab,
     /// Go to the previous tab.
     GoToPreviousTab,
+    /// Go to the last focused tab.
+    GoToLastFocusedTab,
+    /// Go to the last focused pane.
+    GoToLastFocusedPane,
     /// Close the current tab.
     CloseTab,
     /// Go to tab with index [index]
