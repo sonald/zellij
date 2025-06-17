@@ -1020,6 +1020,8 @@ impl TryFrom<Action> for ProtobufAction {
                     create,
                 })),
             }),
+            Action::GoToLastFocusedTab => Err("Unsupported action"),
+            Action::GoToLastFocusedPane => Err("Unsupported action"),
             Action::ToggleTab => Ok(ProtobufAction {
                 name: ProtobufActionName::ToggleTab as i32,
                 optional_payload: None,
