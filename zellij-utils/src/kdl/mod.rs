@@ -64,6 +64,8 @@ macro_rules! parse_kdl_action_arguments {
                 "NoOp" => Ok(Action::NoOp),
                 "GoToNextTab" => Ok(Action::GoToNextTab),
                 "GoToPreviousTab" => Ok(Action::GoToPreviousTab),
+                "GoToLastFocusedTab" => Ok(Action::GoToLastFocusedTab),
+                "FocusLastFocusedPane" => Ok(Action::FocusLastFocusedPane),
                 "CloseTab" => Ok(Action::CloseTab),
                 "ToggleTab" => Ok(Action::ToggleTab),
                 "UndoRenameTab" => Ok(Action::UndoRenameTab),
@@ -1339,6 +1341,12 @@ impl TryFrom<(&KdlNode, &Options)> for Action {
             "NoOp" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
             "GoToNextTab" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),
             "GoToPreviousTab" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "GoToLastFocusedTab" => {
+                parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
+            },
+            "FocusLastFocusedPane" => {
                 parse_kdl_action_arguments!(action_name, action_arguments, kdl_action)
             },
             "CloseTab" => parse_kdl_action_arguments!(action_name, action_arguments, kdl_action),

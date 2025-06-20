@@ -66,6 +66,7 @@ pub struct TiledPanes {
     style: Style,
     session_is_mirrored: bool,
     active_panes: ActivePanes,
+    pane_history: HashMap<ClientId, PaneId>, // track last focused pane per client
     draw_pane_frames: bool,
     panes_to_hide: HashSet<PaneId>,
     fullscreen_is_active: Option<PaneId>,
@@ -106,6 +107,7 @@ impl TiledPanes {
             style,
             session_is_mirrored,
             active_panes: ActivePanes::new(&os_api),
+            pane_history: HashMap::new(),
             draw_pane_frames,
             panes_to_hide: HashSet::new(),
             fullscreen_is_active: None,
@@ -1619,6 +1621,12 @@ impl TiledPanes {
         let connected_clients: Vec<ClientId> =
             { self.connected_clients.borrow().iter().copied().collect() };
         let active_pane_id = self.get_active_pane_id(client_id).unwrap();
+        
+        // Update pane history for all connected clients
+        for client_id in &connected_clients {
+            self.pane_history.insert(*client_id, active_pane_id);
+        }
+        
         let next_active_pane_id = {
             let pane_grid = TiledPaneGrid::new(
                 &mut self.panes,
@@ -1650,6 +1658,12 @@ impl TiledPanes {
         let connected_clients: Vec<ClientId> =
             { self.connected_clients.borrow().iter().copied().collect() };
         let active_pane_id = self.get_active_pane_id(client_id).unwrap();
+        
+        // Update pane history for all connected clients
+        for client_id in &connected_clients {
+            self.pane_history.insert(*client_id, active_pane_id);
+        }
+        
         let next_active_pane_id = {
             let pane_grid = TiledPaneGrid::new(
                 &mut self.panes,
@@ -1680,6 +1694,50 @@ impl TiledPanes {
     fn set_pane_active_at(&mut self, pane_id: PaneId) {
         if let Some(pane) = self.get_pane_mut(pane_id) {
             pane.set_active_at(Instant::now());
+        }
+    }
+    
+    fn update_pane_history(&mut self, client_id: ClientId, previous_pane_id: PaneId) {
+        self.pane_history.insert(client_id, previous_pane_id);
+    }
+    
+    pub fn focus_last_focused_pane(&mut self, client_id: ClientId) {
+        let connected_clients: Vec<ClientId> =
+            { self.connected_clients.borrow().iter().copied().collect() };
+            
+        if let Some(current_active_pane_id) = self.get_active_pane_id(client_id) {
+            if let Some(&last_focused_pane_id) = self.pane_history.get(&client_id) {
+                // Check if the last focused pane still exists and is selectable
+                if self.panes.contains_key(&last_focused_pane_id) 
+                    && !self.panes_to_hide.contains(&last_focused_pane_id)
+                    && self.panes.get(&last_focused_pane_id).map(|p| p.selectable()).unwrap_or(false) {
+                    
+                    // Check if the pane we're switching to is stacked and needs expanding
+                    if self
+                        .panes
+                        .get(&last_focused_pane_id)
+                        .map(|p| p.current_geom().is_stacked())
+                        .unwrap_or(false)
+                    {
+                        let _ = StackedPanes::new_from_btreemap(&mut self.panes, &self.panes_to_hide)
+                            .expand_pane(&last_focused_pane_id);
+                        self.reapply_pane_frames();
+                    }
+                    
+                    // Update history for all connected clients with the current pane before switching
+                    for client_id in &connected_clients {
+                        self.pane_history.insert(*client_id, current_active_pane_id);
+                    }
+                    
+                    // Switch focus to the last focused pane
+                    for client_id in connected_clients {
+                        self.active_panes
+                            .insert(client_id, last_focused_pane_id, &mut self.panes);
+                    }
+                    self.set_pane_active_at(last_focused_pane_id);
+                    self.reset_boundaries();
+                }
+            }
         }
     }
     pub fn cursor_height_width_ratio(&self) -> Option<usize> {

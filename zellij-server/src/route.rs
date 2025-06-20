@@ -531,6 +531,16 @@ pub(crate) fn route_action(
                 .send_to_screen(ScreenInstruction::SwitchTabPrev(client_id))
                 .with_context(err_context)?;
         },
+        Action::GoToLastFocusedTab => {
+            senders
+                .send_to_screen(ScreenInstruction::SwitchToLastFocusedTab(client_id))
+                .with_context(err_context)?;
+        },
+        Action::FocusLastFocusedPane => {
+            senders
+                .send_to_screen(ScreenInstruction::FocusLastFocusedPane(client_id))
+                .with_context(err_context)?;
+        },
         Action::ToggleActiveSyncTab => {
             senders
                 .send_to_screen(ScreenInstruction::ToggleActiveSyncTab(client_id))

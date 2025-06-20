@@ -286,6 +286,8 @@ pub enum ScreenContext {
     ApplyLayout,
     SwitchTabNext,
     SwitchTabPrev,
+    SwitchToLastFocusedTab,
+    FocusLastFocusedPane,
     CloseTab,
     GoToTab,
     GoToTabName,

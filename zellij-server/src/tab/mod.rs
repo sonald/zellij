@@ -2556,6 +2556,18 @@ impl Tab {
         }
         self.tiled_panes.focus_previous_pane(client_id);
     }
+    pub fn focus_last_focused_pane(&mut self, client_id: ClientId) {
+        if !self.has_selectable_panes() {
+            return;
+        }
+        if self.tiled_panes.fullscreen_is_active() {
+            // For fullscreen mode, we need special handling similar to other focus methods
+            // For now, just delegate to the tiled panes 
+            self.tiled_panes.focus_last_focused_pane(client_id);
+            return;
+        }
+        self.tiled_panes.focus_last_focused_pane(client_id);
+    }
     pub fn focus_pane_on_edge(&mut self, direction: Direction, client_id: ClientId) {
         if self.floating_panes.panes_are_visible() {
             self.floating_panes.focus_pane_on_edge(direction, client_id);

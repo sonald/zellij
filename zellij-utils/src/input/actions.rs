@@ -204,6 +204,10 @@ pub enum Action {
     GoToNextTab,
     /// Go to the previous tab.
     GoToPreviousTab,
+    /// Go to the last focused tab.
+    GoToLastFocusedTab,
+    /// Focus the last focused pane.
+    FocusLastFocusedPane,
     /// Close the current tab.
     CloseTab,
     GoToTab(u32),

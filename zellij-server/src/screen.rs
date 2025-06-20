@@ -227,6 +227,8 @@ pub enum ScreenInstruction {
     ),
     SwitchTabNext(ClientId),
     SwitchTabPrev(ClientId),
+    SwitchToLastFocusedTab(ClientId),
+    FocusLastFocusedPane(ClientId),
     ToggleActiveSyncTab(ClientId),
     CloseTab(ClientId),
     GoToTab(u32, Option<ClientId>), // this Option is a hacky workaround, please do not copy this behaviour
@@ -506,6 +508,8 @@ impl From<&ScreenInstruction> for ScreenContext {
             ScreenInstruction::ApplyLayout(..) => ScreenContext::ApplyLayout,
             ScreenInstruction::SwitchTabNext(..) => ScreenContext::SwitchTabNext,
             ScreenInstruction::SwitchTabPrev(..) => ScreenContext::SwitchTabPrev,
+            ScreenInstruction::SwitchToLastFocusedTab(..) => ScreenContext::SwitchToLastFocusedTab,
+            ScreenInstruction::FocusLastFocusedPane(..) => ScreenContext::FocusLastFocusedPane,
             ScreenInstruction::CloseTab(..) => ScreenContext::CloseTab,
             ScreenInstruction::GoToTab(..) => ScreenContext::GoToTab,
             ScreenInstruction::GoToTabName(..) => ScreenContext::GoToTabName,
@@ -1093,6 +1097,34 @@ impl Screen {
                     );
                 },
                 Err(err) => Err::<(), _>(err).with_context(err_context).non_fatal(),
+            }
+        }
+        Ok(())
+    }
+
+    /// Switch to the last focused tab for the given client.
+    pub fn switch_to_last_focused_tab(&mut self, client_id: ClientId) -> Result<()> {
+        let err_context = || format!("failed to switch to last focused tab for client {client_id}");
+
+        let client_id = if self.get_active_tab(client_id).is_ok() {
+            Some(client_id)
+        } else {
+            self.get_first_client_id()
+        };
+
+        if let Some(client_id) = client_id {
+            let client_tab_history = self.tab_history.entry(client_id).or_insert_with(Vec::new);
+            if let Some(last_focused_tab_index) = client_tab_history.pop() {
+                if self.tabs.contains_key(&last_focused_tab_index) {
+                    return self.switch_active_tab(
+                        self.tabs.get(&last_focused_tab_index)
+                            .map(|t| t.position)
+                            .unwrap_or(0),
+                        None,
+                        true,
+                        client_id,
+                    );
+                }
             }
         }
         Ok(())
@@ -3880,6 +3912,20 @@ pub(crate) fn screen_thread_main(
                 screen.switch_tab_prev(None, true, client_id)?;
                 screen.unblock_input()?;
                 screen.render(None)?;
+            },
+            ScreenInstruction::SwitchToLastFocusedTab(client_id) => {
+                screen.switch_to_last_focused_tab(client_id)?;
+                screen.unblock_input()?;
+                screen.render(None)?;
+            },
+            ScreenInstruction::FocusLastFocusedPane(client_id) => {
+                active_tab_and_connected_client_id!(
+                    screen,
+                    client_id,
+                    |tab: &mut Tab, client_id: ClientId| tab.focus_last_focused_pane(client_id)
+                );
+                screen.render(None)?;
+                screen.unblock_input()?;
             },
             ScreenInstruction::CloseTab(client_id) => {
                 screen.close_tab(client_id)?;

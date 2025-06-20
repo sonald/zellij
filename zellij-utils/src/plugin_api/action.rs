@@ -1265,7 +1265,9 @@ impl TryFrom<Action> for ProtobufAction {
             | Action::ListClients
             | Action::StackPanes(..)
             | Action::ChangeFloatingPaneCoordinates(..)
-            | Action::SkipConfirm(..) => Err("Unsupported action"),
+            | Action::SkipConfirm(..)
+            | Action::GoToLastFocusedTab
+            | Action::FocusLastFocusedPane => Err("Unsupported action"),
         }
     }
 }
